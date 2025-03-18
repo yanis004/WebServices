@@ -1,106 +1,99 @@
+// Importation des modules nécessaires
 const express = require("express");
 const postgres = require("postgres");
 const z = require("zod");
+const crypto = require("crypto");
 
+// Initialisation de l'application Express
 const app = express();
 const port = 8000;
-const sql = postgres({ db: "mydb", user: "user", password: "password" });
 
+// Configuration de la connexion à PostgreSQL
+const sql = postgres({
+  host: "localhost",
+  port: 5450,
+  database: "mydb",
+  username: "user",
+  password: "password",
+  ssl: false,
+});
+
+// Middleware pour lire le JSON reçu dans les requêtes
 app.use(express.json());
 
-// Schemas
-const ProductSchema = z.object({
+// Schéma de validation pour un utilisateur
+const UserSchema = z.object({
   id: z.string(),
   name: z.string(),
-  about: z.string(),
-  price: z.number().positive(),
-});
-const CreateProductSchema = ProductSchema.omit({ id: true });
-
-// Route Hello World
-app.get("/", (req, res) => {
-  res.send("Hello World!");
+  password: z.string(),
+  email: z.string().email(),
 });
 
-// GET tous les produits (avec pagination)
-app.get("/products", async (req, res) => {
+const CreateUserSchema = UserSchema.omit({ id: true });
+const UpdateUserSchema = UserSchema.omit({ id: true, password: true }).partial();
+
+// Route PUT pour mettre à jour un utilisateur (remplace toute la ressource)
+app.put("/users/:id", async (req, res) => {
+  const userId = req.params.id;
+  const result = CreateUserSchema.safeParse(req.body);
+
+  if (!result.success) {
+    return res.status(400).json({ error: "Données invalides", details: result.error });
+  }
+
+  const { name, password, email } = result.data;
+  const hashedPassword = crypto.createHash("sha512").update(password).digest("hex");
+
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
-
-    const products = await sql`
-      SELECT * FROM products 
-      LIMIT ${limit} 
-      OFFSET ${offset}
+    const user = await sql`
+      UPDATE users
+      SET name = ${name}, password = ${hashedPassword}, email = ${email}
+      WHERE id = ${userId}
+      RETURNING id, name, email
     `;
-    res.json(products);
+
+    if (user.length === 0) {
+      return res.status(404).json({ error: "Utilisateur non trouvé" });
+    }
+
+    res.json(user[0]);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: "Erreur lors de la mise à jour de l'utilisateur" });
   }
 });
 
-// GET un produit par ID
-app.get("/products/:id", async (req, res) => {
+// Route PATCH pour mettre à jour partiellement un utilisateur
+app.patch("/users/:id", async (req, res) => {
+  const userId = req.params.id;
+  const result = UpdateUserSchema.safeParse(req.body);
+
+  if (!result.success) {
+    return res.status(400).json({ error: "Données invalides", details: result.error });
+  }
+
+  const updates = Object.entries(result.data).map(([key, value]) => `${key} = '${value}'`).join(", ");
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: "Aucune donnée à mettre à jour" });
+  }
+
   try {
-    const { id } = req.params;
-    const product = await sql`
-      SELECT * FROM products WHERE id = ${id}
+    const user = await sql`
+      UPDATE users
+      SET ${sql.raw(updates)}
+      WHERE id = ${userId}
+      RETURNING id, name, email
     `;
-    
-    if (product.length === 0) {
-      return res.status(404).json({ error: "Product not found" });
+
+    if (user.length === 0) {
+      return res.status(404).json({ error: "Utilisateur non trouvé" });
     }
-    
-    res.json(product[0]);
+
+    res.json(user[0]);
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST nouveau produit
-app.post("/products", async (req, res) => {
-  const result = await CreateProductSchema.safeParse(req.body);
-
-  try {
-    if (result.success) {
-      const { name, about, price } = result.data;
-      
-      const product = await sql`
-        INSERT INTO products (name, about, price)
-        VALUES (${name}, ${about}, ${price})
-        RETURNING *
-      `;
-
-      res.status(201).json(product[0]);
-    } else {
-      res.status(400).json({
-        error: "Validation failed",
-        details: result.error.errors
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// DELETE un produit
-app.delete("/products/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const deletedProduct = await sql`
-      DELETE FROM products 
-      WHERE id = ${id}
-      RETURNING *
-    `; 
-    
-    if (deletedProduct.length === 0) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-    
-    res.json({ message: "Product deleted successfully" });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: "Erreur lors de la mise à jour de l'utilisateur" });
   }
 });
 
